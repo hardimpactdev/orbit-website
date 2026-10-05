@@ -62,12 +62,14 @@ jobs:
           repositories: orbit-website
           permission-contents: write
           permission-pull-requests: write
+          permission-vulnerability-alerts: read
       - name: Deterministic upstream scan or draft candidate
         uses: renovatebot/github-action@8e77cf46224fc50340c7721f3022d7af87a8ffaa
         with:
           configurationFile: scripts/maintenance/renovate.cjs
           token: ${{ steps.app.outputs.token }}
           renovate-version: 44.137.0
+          renovate-image: ghcr.io/renovatebot/renovate:44.137.0@sha256:805dbf260d627b5dc53a59be9c26b7be2854977e47d3c94366e97b6cadc4a626
           mount-docker-socket: false
           additional-env-list: MAINTENANCE_CANDIDATE_MODE
         env:
@@ -103,12 +105,18 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-isolated]
     timeout-minutes: 45
+    outputs:
+      proof_passed: ${{ steps.proof.outputs.proof_passed }}
+      proof_sha: ${{ steps.proof.outputs.proof_sha }}
+      proof_context: ${{ steps.proof.outputs.proof_context }}
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       PROOF_CONTEXT: ${{ github.run_id }}/${{ github.run_attempt }}
     steps:
       - name: Initialize the proof location after runner assignment
-        run: echo "PROOF_DIR=$RUNNER_TEMP/maintenance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+        run: |
+          echo "PROOF_DIR=$RUNNER_TEMP/maintenance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "PROOF_KEY=$RUNNER_TEMP/maintenance-key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Trusted policy from the base commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -127,25 +135,22 @@ jobs:
           MAINTENANCE_RUNNER_APPROVED: ${{ vars.MAINTENANCE_RUNNER_APPROVED }}
           MAINTENANCE_RUNNER_ISOLATED: ${{ vars.MAINTENANCE_RUNNER_ISOLATED }}
         run: |
-          python3 scripts/maintenance/maintenance.py preflight --ci
+          python3 scripts/maintenance/maintenance.py preflight --ci --runner
           python3 scripts/maintenance/test_maintenance.py
-      - name: Install locked dependencies without lifecycle scripts or host credentials
-        working-directory: candidate
-        run: |
-          set -euo pipefail
-          test ! -e .env
-          mkdir -p "$RUNNER_TEMP/package-home"
-          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" COMPOSER_NO_INTERACTION=1 composer install --no-scripts --no-plugins --prefer-dist --no-progress
-          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" bun install --frozen-lockfile --ignore-scripts
-      - name: Full suites and explicit browser proof
+          python3 scripts/maintenance/test_security.py
+      - name: Trusted host verifier runs dependencies and full suites inside the boundary
         run: |
           python3 policy/scripts/maintenance/maintenance.py --contract policy/.maintenance/contract.json check \
-            --root candidate --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR"
+            --root candidate --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR" --key-file "$PROOF_KEY"
       - name: Always evaluate the evidence gate
+        id: proof
         if: always()
         run: |
           python3 policy/scripts/maintenance/maintenance.py --contract policy/.maintenance/contract.json gate \
-            --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR"
+            --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR" --key-file "$PROOF_KEY"
+          echo "proof_passed=true" >> "$GITHUB_OUTPUT"
+          echo "proof_sha=$EXPECTED_SHA" >> "$GITHUB_OUTPUT"
+          echo "proof_context=$PROOF_CONTEXT" >> "$GITHUB_OUTPUT"
       - name: Retain execution evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -154,3 +159,26 @@ jobs:
           path: ${{ env.PROOF_DIR }}
           if-no-files-found: error
           retention-days: 14
+      - name: Remove the host-only proof key
+        if: always()
+        run: rm -f -- "$PROOF_KEY"
+
+  maintenance-gate:
+    needs: [eligibility, verify]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-isolated]
+    timeout-minutes: 5
+    steps:
+      - name: Fresh trusted policy for the final decision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Require every prerequisite and exact current proof
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          PROOF_CONTEXT: ${{ github.run_id }}/${{ github.run_attempt }}
+        run: |
+          python3 scripts/maintenance/maintenance.py final \
+            --needs "$NEEDS_JSON" --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT"

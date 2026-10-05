@@ -17,5 +17,8 @@
     "maximum_correction_rounds": 3,
     "quarantine_label": "maintenance-quarantined",
     "notification_mode": "receipt-only",
-    "production_tests": false
+    "production_tests": false,
+    "executor": "docker-no-host-mounts",
+    "required_workflow_job": "maintenance-gate",
+    "proof_seal": "hmac-sha256-host-only"
 }

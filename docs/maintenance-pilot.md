@@ -1,128 +1,155 @@
 # Orbit Website maintenance pilot
 
-This branch is a PR-only prototype. It does not enable a default-branch schedule,
-register a runner, add secrets, change branch protection, merge or deploy anything.
-The schedule configuration is 01:17 UTC; scheduled runs scan only. An enabled
-`workflow_dispatch` with `mode=candidate` permits Renovate draft PRs. Adoption of
-scheduled candidate creation is a later explicit rollout decision.
+This is a PR-only prototype. Activation is off. No runner, App, secret, permission,
+branch protection, merge or production setting is created by this branch.
+The 01:17 UTC schedule scans only; an enabled main-branch dispatch with
+`mode=candidate` may create draft candidates. Scheduled publication is a later decision.
 
-## What runs
+## Dependency policy
 
-Pinned Renovate 44.137.0 owns dependency discovery and lockfile resolution for
-Composer and JavaScript/Bun. Ordinary compatible releases must be seven days old
-with known timestamps. Upstream security alerts may bypass age only; major,
-replacement and broad lockfile-maintenance updates stay disabled. There is one
-ordinary PR slot and one security slot. All candidates remain drafts and cannot
-automerge. Package scripts/plugins and post-upgrade commands are disabled in the
-credentialed controller. The controller never runs application tests.
+Renovate 44.137.0 is pinned to OCI digest
+`sha256:805dbf260d627b5dc53a59be9c26b7be2854977e47d3c94366e97b6cadc4a626`.
+The pinned action accepts the complete `image:tag@sha256:digest` reference verbatim.
+Composer and JavaScript/Bun compatible updates require a known release timestamp and
+seven days of age. Security alerts bypass age only. Major/replacement/rollback/pin/
+digest updates and broad lockfile maintenance stay disabled. There is one ordinary
+and one security PR slot. All PRs remain drafts; automerge and deployment are disabled.
+Controller package scripts/plugins and post-upgrade commands are disabled.
 
-The separate candidate VM has no write token or application secrets. It checks
-out the exact PR head and uses the verification program from the trusted base.
-It runs full Unit/Feature tests with `--no-tia`, existing PHPStan analysis,
-`vp check`, client and SSR builds, and the existing browser runner explicitly.
-This preserves `composer check` components and closes the live Orbit task-check
-gap: the current Orbit check omits browser tests. No Orbit project setting changes.
+The dedicated App token explicitly requests Contents write, Pull requests write and
+Vulnerability alerts read. Its key belongs only to the protected-main-only
+`maintenance-controller` environment. Candidate jobs never receive it.
 
-The gate requires actual JUnit test cases and assertions, zero skips/failures/errors,
-current full SHA, run context, contract digest and report digest. Missing tools,
-missing browser binaries, absent reports, skipped jobs or stale evidence fail.
-Feature tests disable SSR; their success is not SSR rendering proof. The existing
-browser runner builds and starts its own SSR process, checks its health, and renders
-the isolated candidate with SSR errors enabled. It uses fixed port 13719, so local
-validation must first prove that port is free; never stop another instance's SSR.
-Production process/page checks remain outside this PR-only prototype.
+## Trusted verifier and candidate boundary
 
-## Runner and permission request before enablement
+The workflow checks out policy from the PR base and candidate source at the exact head.
+Only the trusted host verifier runs on the runner. It requires a clean tracked checkout
+before and after execution, including a stable HEAD. Candidate source comes from Git
+objects at that head; untracked files and every `.env*` blob are excluded without reading
+their contents. An empty synthetic `.env.testing` is injected; test values are supplied
+through a fixed process environment. No candidate code or package installation runs
+directly on the host. There is no native execution fallback for the acceptance gate.
 
-Only nckrtl/orbit currently has verified Sabre runner registrations. Request two
-repository-allowlisted, disposable one-job VM capabilities for nckrtl/orbit-website:
+The verifier creates one disposable Docker workspace volume. Candidate containers have
+read-only root filesystems, UID/GID 10001, all capabilities dropped, no-new-privileges,
+private PID/IPC/cgroup namespaces, 512 processes, 4 GiB RAM and two CPUs. Their only
+persistent mount is that job's workspace volume; `/tmp` is a private 512 MiB tmpfs.
+No host bind mounts, policy, proof directory, key, Docker socket, home, devices or
+published ports are accepted. Every container is inspected before it starts; unexpected
+mounts or privilege settings fail closed. A namespace/access probe runs before installs.
 
-- Controller label `orbit-website-maintenance-controller`: trusted protected-base
-  configuration only; isolated Docker daemon inside its VM; no host Docker socket
-  mounted into Renovate. Network to GitHub and required registries only.
-- Candidate label `orbit-website-maintenance-isolated`: clean filesystem and test
-  data, no production network or mounted home/secrets, no persistent shared caches.
-  PHP 8.5, Composer 2.9, Bun compatible with the committed packageManager, VitePlus
-  and a matching Playwright Chromium installation at `/opt/playwright` are needed.
-  Pin and record the approved image digest during provisioning.
+Composer `--no-scripts --no-plugins` and Bun `--frozen-lockfile --ignore-scripts` run in
+containers on the approved registry-only package network. Each application stage runs
+in a fresh container with networking disabled. The existing browser runner's HTTP/SSR
+servers communicate over loopback inside its container; port 13719 is not published.
+Processes stop before evidence collection. Fresh read-only inspector containers read
+only the host-selected source paths using the pinned image's tar executable. The host
+compares source hashes before and after every stage; changed tests, scripts, manifests,
+or other tracked source fail the run. Tar reports are parsed in memory, never extracted
+onto host paths; symlinks, traversal, duplicates and oversized archives are rejected.
 
-Set repository variables `MAINTENANCE_RUNNER_APPROVED=true` and
-`MAINTENANCE_RUNNER_ISOLATED=true` only after a disposable-runner proof. Missing
-variables make preflight exit nonzero. No matching runner leaves the job pending,
-never successful; cancel a queue that exceeds the operator's five-minute queue SLA.
-There is no hosted/shared runner fallback and no runner registration in this branch.
+The host records Docker exit state, command results and JUnit data. Policy, receipts,
+reports and gate decision are covered by a per-run HMAC seal whose private key remains
+outside candidate/container/artifact storage. The independent gate rechecks the seal,
+current policy hash, full head, context, contract, JUnit counts and report digests.
+Changing policy or evidence after sealing fails. The key is not uploaded and is deleted
+after evaluation; this is a same-run integrity boundary, not a portable public signature.
+Artifacts retain logs and decisions; reproduce the run to obtain fresh acceptance.
 
-Install a dedicated maintenance GitHub App on this repository only. It needs
-Contents write and Pull requests write to create draft candidates, plus verified
-read access to security advisories/Dependabot alerts for the security lane.
-Create environment `maintenance-controller` with deployment branch access limited
-to protected `main`, no PR refs or tags. Supply `MAINTENANCE_APP_PRIVATE_KEY` only
-as that environment's secret, and `MAINTENANCE_APP_ID` as a variable. The controller
-runner admission policy must accept only the reviewed default-branch scan/reporting
-workflows. PR metadata and candidate jobs use the unprivileged isolated runner.
-Do not store this App key as a repository-wide secret or reuse ReviewBot's credential.
-Set `MAINTENANCE_PILOT_ENABLED=true` only after the reviewed policy is on main and
-the runner/App proofs pass. Do not run candidate code in `pull_request_target`.
+Full checks remain PHP Unit/Feature with `--no-tia`, PHPStan, `vp check`, client and SSR
+builds, and explicit browser execution. Warnings/risky PHP tests cause failure where
+reported by PHPUnit. Missing/empty/skipped/failed reports cannot pass. The final
+`maintenance-gate` job always evaluates PR prerequisites and rejects any missing,
+skipped, cancelled or failed eligibility/verification job or mismatched proof output.
+Make that final job required only through separately approved repository settings.
 
-The initial infrastructure PR cannot validate itself with a policy script that is
-not yet on its base branch. Its full local proofs accompany the prototype handoff;
-CI intentionally fails closed until the reviewed policy exists on the trusted base.
-Do not change the workflow to trust unreviewed candidate policy to bypass that gate.
+## Runner approval contract
 
-## Failures quarantine and bounded work
+Before any candidate execution, an administrator must provision a disposable one-job
+VM and root-owned, non-symlink, non-group/world-writable
+`/etc/orbit-maintenance/runner.json` and parent directory. Repository variables alone
+cannot authorize Docker execution. This file is not created by the prototype.
 
-The verifier makes one test attempt, bounds each command and kills its process
-group on timeout. It writes a stable SHA/stage failure fingerprint and a quarantined
-receipt with an OpsBot handoff. There are no real Slack/Grok notification calls.
-The reporting workflow labels only the current failing maintenance PR and adds
-one idempotent comment per failing head. Renovate stops updating that label and
-does not recreate closed PRs or automatically rebase a failed candidate.
+Required configuration fields (placeholders below deliberately do not pass preflight):
 
-Keep the existing PR as the repair owner. OpsBot routes paired base/candidate
-reproduction to BugBot; a healthy base with a failing update is a compatibility
-regression, not a fabricated main bug. PlanBot may create one repair group when
-reproduced. Allow at most two safe infrastructure retries and three correction
-rounds; deterministic test failures are not retried blindly. Remove quarantine
-only after a documented fix/new relevant version and review; rerun every gate.
-Transport integration and automated Grok delivery remain disabled until an
-authenticated endpoint, deduplication acknowledgment and permissions are approved.
-
-No production credentials or targets are included. Later deployment must have one
-owner, full artifact identity, real page rendering checks and a separately proved
-safe rollback contract. Switching code cannot undo database migrations or external
-effects. ReviewBot and ProdBot's current role contract remains unchanged.
-
-## Local proof commands
-
-The Python suite tests the control-plane wrapper, not Laravel behavior. Existing
-application tests remain Pest tests. Run from the repository root:
-
-```sh
-python3 scripts/maintenance/test_maintenance.py
-python3 scripts/maintenance/maintenance.py preflight
-python3 scripts/maintenance/maintenance.py preflight --ci
-# The last command MUST fail without approved-runner variables.
-python3 scripts/maintenance/maintenance.py check --root . --sha FULL_HEAD_SHA \
-  --context local-validation --output /tmp/unique-new-maintenance-receipts
-python3 scripts/maintenance/maintenance.py gate --sha FULL_HEAD_SHA \
-  --context local-validation --output /tmp/unique-new-maintenance-receipts
+```json
+{
+    "schema_version": 1,
+    "disposable_vm": true,
+    "workflow_admission": "reviewed-policy-only",
+    "candidate_image": "APPROVED_REPOSITORY@sha256:APPROVED_DIGEST",
+    "package_network": "orbit-maintenance-packages",
+    "network_policy_sha256": "APPROVED_EGRESS_PROOF_DIGEST",
+    "boundary_proof_sha256": "APPROVED_BOUNDARY_PROOF_DIGEST"
+}
 ```
 
-Use a clean development checkout with no `.env` or cached application config.
-The checked-in `.env.testing` fixture is temporarily withheld without reading its
-contents and restored in a finally block. Tests receive synthetic SQLite-memory,
-array-mail, synchronous-queue settings and a disposable HOME. Never run this against
-a live instance. Install locked dependencies without lifecycle scripts in a clean
-environment; Laravel builds its package manifest when the isolated app boots.
-`check --dry-run` describes stages without executing them. Local receipts are
-clearly identified as local and do not substitute for approved Actions execution.
+The image must already exist locally at the exact digest; no implicit pull occurs.
+It needs PHP 8.5, Composer 2.9, repository-declared Bun 1.3.14, Node/VitePlus support,
+matching Chromium at `/opt/playwright`, Python 3, `/usr/bin/env`, `/usr/bin/tar`,
+`/bin/sh`, and an empty `/work` owned by UID/GID 10001. No image-declared extra volumes,
+secrets, privileged helpers or host access. The host has Python 3 and `/usr/bin/docker`
+using only `unix:///var/run/docker.sock`. The default Docker seccomp/LSM policy stays on.
+The approved bridge network carries label `orbit.maintenance.egress-policy` matching
+the configured digest. Firewall/egress enforcement and job admission are administrator
+responsibilities, not established merely by that label or configuration declaration.
 
-The normalized `policy --update file.json` command provides a separate review/fixture
-check for age and verified security exceptions; Renovate performs actual version
-selection. A normalized file is not trusted advisory evidence by itself. Neither
-command grants permission to merge. Preserve upstream advisory links in the PR.
+Before installing approval, independently prove namespace/mount isolation, rejection of
+attempted policy/proof/key access and mutation, offline test egress, registry-only install
+egress, process cleanup, volume disposal and correct toolchain. Admission must reject
+unreviewed workflow code that could run arbitrary host steps, including PR workflow
+edits; accept only the reviewed policy workflow version. Enforce this outside candidate
+YAML through the runner service's admission control. The verifier does not claim that
+its repository YAML or an approval variable can police a malicious replacement workflow.
 
-References: [Renovate release age](https://docs.renovatebot.com/configuration-options/#minimumreleaseage),
-[security alerts](https://docs.renovatebot.com/configuration-options/#vulnerabilityalerts),
-[self-hosted script controls](https://docs.renovatebot.com/self-hosted-configuration/#allowscripts),
-[GitHub self-hosted runner security](https://docs.github.com/en/actions/reference/security/secure-use).
+Keep separate repository-allowlisted labels:
+- `orbit-website-maintenance-controller`: reviewed main-only scan/reporting, isolated
+  Docker daemon, no host socket mounted into Renovate, no production access.
+- `orbit-website-maintenance-isolated`: trusted host verifier plus the boundary above;
+  no production network/home/credentials or shared persistent caches.
+
+Set `MAINTENANCE_RUNNER_APPROVED` and `MAINTENANCE_RUNNER_ISOLATED` only after proofs.
+Install a repository-only maintenance App with metadata read, Contents write, Pull
+requests write and Dependabot alerts read; no Workflows/Administration/Deployments/
+Secrets permissions or bypass. Configure its ID variable and environment-only key
+without pasting secrets into chat. Dependabot settings changes also need approval.
+Keep `MAINTENANCE_PILOT_ENABLED` unset/false until separate activation approval.
+
+## Remaining integration gates
+
+No approved boundary/runner/App execution is claimed by offline fixtures. The existing
+407-browser run failed at the earlier head. Focused base/candidate comparisons establish
+nine stable baseline assertion mismatches and three intermittent cases; two intermittent
+cases lack base reproduction. Browser repair is separate: do not weaken or redesign the
+application/tests to manufacture green. Full browser proof at the final head remains due.
+
+Initial trusted-base bootstrap remains an adoption gate: the first PR's base lacks this
+policy. Authorized reviewers must resolve that bootstrap without trusting unreviewed
+candidate verifier code. Orbit Tasks opens the PR through Anna -> OpsBot -> PlanBot;
+ReviewBot owns exact-head review/merge, ProdBot any subsequent deployment.
+
+Missing runners remain pending, not successful. The five-minute queue SLA is an operator
+procedure, not a hosted-runner fallback. After approval, prove a real scan, draft candidate,
+same-head final check and quarantine. The reporter uses no candidate checkout/artifact
+execution, validates current PR identity and adds one idempotent receipt per head.
+Grok transport remains receipt-only; no external messaging is implemented.
+
+## Commands
+
+```sh
+python3 -m unittest discover -s scripts/maintenance -p 'test_*.py'
+python3 scripts/maintenance/maintenance.py preflight
+python3 scripts/maintenance/maintenance.py preflight --ci --runner
+# The preceding command must fail on an unapproved host.
+python3 scripts/maintenance/maintenance.py check --root CANDIDATE --sha FULL_HEAD_SHA --context RUN_ID/ATTEMPT --output FRESH_OUTPUT --key-file PRIVATE_HOST_KEY_PATH
+python3 scripts/maintenance/maintenance.py gate --sha FULL_HEAD_SHA --context RUN_ID/ATTEMPT --output FRESH_OUTPUT --key-file PRIVATE_HOST_KEY_PATH
+```
+
+The check creates the new private key exclusively; its path must be outside the checkout
+and output directory. Never archive or upload it. Local nonbrowser diagnostic runs may
+use the safe environment/opaque-fixture helper against a clean isolated checkout, but
+they create no accepted boundary seal and are not substitutes for the approved workflow.
+The helper checks tracked cleanliness before replacement and after restoration, including
+on exceptions. Commands are bounded, no test retries are automatic, and failures retain
+the existing candidate as owner. At most two safe infrastructure retries and three repair
+rounds; quarantine is removed only after a documented fix and fresh complete proof.

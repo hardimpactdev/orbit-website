@@ -76,7 +76,11 @@ class MaintenanceProofTest(unittest.TestCase):
 
     def test_gate_cli_rechecks_real_reports_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)
+            out=Path(tmp)/'proof'
+            out.mkdir()
+            key=Path(tmp)/'seal-key'
+            key.write_bytes(b'fixture-key-not-a-credential-12345')
+            key.chmod(0o600)
             for stage in m.TEST_STAGES:
                 path=out/(stage+'.xml')
                 path.write_text('<testsuite><testcase assertions="2"/></testsuite>')
@@ -84,17 +88,20 @@ class MaintenanceProofTest(unittest.TestCase):
                 self.receipts[stage]['junit_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
             for stage,receipt in self.receipts.items():
                 m.write(out/(stage+'.json'),receipt)
+            m.write(out/'boundary.json',{'executor':'docker-no-host-mounts','passed':True})
+            m.seal_evidence(out,key,HEAD,CONTEXT)
             command=[sys.executable,str(ROOT/'scripts/maintenance/maintenance.py'),'--contract',str(ROOT/'.maintenance/contract.json'),
-                     'gate','--sha',HEAD,'--context',CONTEXT,'--output',str(out)]
+                     'gate','--sha',HEAD,'--context',CONTEXT,'--output',str(out),'--key-file',str(key)]
             passed=subprocess.run(command,capture_output=True,text=True,timeout=10)
             self.assertEqual(0,passed.returncode,passed.stdout)
             (out/'browser.xml').write_text('<testsuite/>')
             failed=subprocess.run(command,capture_output=True,text=True,timeout=10)
             self.assertNotEqual(0,failed.returncode)
-            self.assertIn('mismatch',failed.stdout)
+            self.assertIn('changed',failed.stdout)
             (out/'php.xml').unlink()
             missing=subprocess.run(command,capture_output=True,text=True,timeout=10)
-            self.assertIn('missing or malformed JUnit',missing.stdout)
+            self.assertNotEqual(0,missing.returncode)
+            self.assertIn('changed',missing.stdout)
 
     def test_command_timeout_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:

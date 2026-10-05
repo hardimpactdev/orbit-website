@@ -4,16 +4,21 @@ import argparse
 from contextlib import contextmanager
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import isolation
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 STAGES = ("php", "analysis", "frontend", "build", "browser")
@@ -38,7 +43,9 @@ def contract_check(contract, renovate):
     errors = []
     expected = {"mode": "pr-only", "automerge": False, "deploy": False,
                 "ordinary_age_days": 7, "security_bypasses_age_only": True,
-                "production_tests": False, "test_retries": 0}
+                "production_tests": False, "test_retries": 0,
+                "executor": "docker-no-host-mounts", "required_workflow_job": "maintenance-gate",
+                "proof_seal": "hmac-sha256-host-only"}
     for key, value in expected.items():
         if contract.get(key) != value:
             errors.append("contract must preserve " + key)
@@ -155,6 +162,10 @@ def safe_environment(root, home):
 def withheld_testing_fixture(root):
     """Replace the opaque fixture with an empty synthetic file, then restore it unread."""
     fixture = root / '.env.testing'
+    original_head = None
+    if (root/'.git').exists():
+        original_head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+        isolation.clean_head(root, original_head)
     if fixture.is_symlink():
         raise ValueError('testing fixture must not be a symlink')
     # A rename must stay on the checkout's filesystem; /tmp may be another mount.
@@ -177,6 +188,8 @@ def withheld_testing_fixture(root):
                 fixture.unlink()
             if existed:
                 backup.rename(fixture)
+            if original_head:
+                isolation.clean_head(root, original_head)
 
 
 def execute(command, root, env, log, timeout):
@@ -203,55 +216,154 @@ def execute(command, root, env, log, timeout):
             raise
 
 
+def policy_hash():
+    root = Path(__file__).resolve().parent
+    return digest({name: hashlib.sha256((root/name).read_bytes()).hexdigest()
+                   for name in ('maintenance.py', 'isolation.py')})
+
+
+def proof_files(out):
+    files = {}
+    for path in sorted(Path(out).iterdir()):
+        if path.name == 'seal.json':
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('proof directory accepts only regular files')
+        files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return files
+
+
+def seal_evidence(out, key_file, sha, context):
+    payload = {'sha': sha, 'context': context, 'policy_hash': policy_hash(),
+               'files': proof_files(out)}
+    signature = hmac.new(Path(key_file).read_bytes(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+    write(Path(out)/'seal.json', {'payload': payload, 'signature': signature})
+
+
+def verify_seal(out, key_file, sha, context):
+    out, key_file = Path(out), Path(key_file)
+    if key_file.is_symlink() or key_file.stat().st_mode & 0o077:
+        raise ValueError('proof key must be a private regular host file')
+    seal = load(out/'seal.json')
+    payload = {'sha': sha, 'context': context, 'policy_hash': policy_hash(), 'files': proof_files(out)}
+    expected = hmac.new(key_file.read_bytes(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+    if seal.get('payload') != payload or not hmac.compare_digest(seal.get('signature', ''), expected):
+        raise ValueError('proof or trusted policy changed after the host sealed the evidence')
+    boundary = load(out/'boundary.json')
+    if boundary.get('executor') != 'docker-no-host-mounts' or boundary.get('passed') is not True:
+        raise ValueError('approved container boundary proof is missing or failed')
+
+
+def final_results(needs, sha, context):
+    errors = []
+    for job in ('eligibility', 'verify'):
+        if needs.get(job, {}).get('result') != 'success':
+            errors.append(job + ': missing, skipped, cancelled or failed prerequisite')
+    outputs = needs.get('verify', {}).get('outputs', {})
+    for key, value in {'proof_passed': 'true', 'proof_sha': sha, 'proof_context': context}.items():
+        if outputs.get(key) != value:
+            errors.append('verify: invalid ' + key)
+    if not SHA.fullmatch(sha):
+        errors.append('full expected SHA required')
+    return errors
+
+
 def run_checks(args, contract):
     root, out = Path(args.root).resolve(), Path(args.output).resolve()
     if (root / '.env').exists():
         raise ValueError("isolated checkout must not contain .env; do not reuse live app configuration")
     if (root / 'bootstrap/cache/config.php').exists():
         raise ValueError("cached application configuration is forbidden in isolated validation")
-    head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-    if head != args.sha:
-        raise ValueError("checkout HEAD differs from expected SHA")
+    isolation.clean_head(root, args.sha)
+    config = isolation.approved_config()  # No native/local fallback.
+    key_file = Path(args.key_file).resolve()
+    if key_file.is_relative_to(out) or key_file.is_relative_to(root):
+        raise ValueError('seal key must stay outside the candidate checkout and proof artifacts')
     if out.exists() and any(out.iterdir()):
         raise ValueError("use a fresh output directory; stale receipts must never pass")
     out.mkdir(parents=True, exist_ok=True)
+    with os.fdopen(os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as key:
+        key.write(secrets.token_bytes(32))
+    initial_policy = policy_hash()
+    source, expected_source = isolation.committed_source(root, args.sha)
+    # Container files never contain host configuration, policy, evidence or the seal key.
+    env = safe_environment(Path('/work'), Path('/tmp/home'))
+    env['PATH'] = '/work/node_modules/.bin:/usr/local/bin:/usr/bin:/bin'
+    env['TMPDIR'] = '/tmp'
+    env['PLAYWRIGHT_BROWSERS_PATH'] = '/opt/playwright'
     commands = {
-        'php': ['php', 'vendor/bin/pest', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--testsuite=Unit,Feature', '--log-junit', str(out/'php.xml')],
+        'php': ['php', 'vendor/bin/pest', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--testsuite=Unit,Feature', '--log-junit', '/work/.maintenance-php.xml'],
         'analysis': ['composer', 'analyse'],
         'frontend': ['vp', 'check'],
         'build': ['bun', 'run', 'build'],
-        'browser': ['php', 'scripts/run-browser-tests.php', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--log-junit', str(out/'browser.xml')],
+        'browser': ['php', 'scripts/run-browser-tests.php', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--log-junit', '/work/.maintenance-browser.xml'],
     }
     receipts = {}
-    with withheld_testing_fixture(root), tempfile.TemporaryDirectory(prefix='orbit-maintenance-') as home:
-        env = safe_environment(root, Path(home))
-        for stage, command in commands.items():
-            start = time.monotonic()
-            try:
-                code = execute(command, root, env, out/(stage+'.log'), contract['maximum_command_seconds'])
-            except OSError as error:
-                code = 127
-                (out/(stage+'.log')).write_text(str(error))
-            receipt = {"schema_version": 1, "sha": args.sha, "context": args.context,
-                       "contract_hash": digest(contract), "stage": stage, "command": command,
-                       "executed": True, "status": "passed" if code == 0 else "failed",
-                       "exit_code": code, "duration_seconds": round(time.monotonic()-start, 3)}
-            if stage in TEST_STAGES:
-                try:
-                    path = out/(stage+'.xml')
-                    receipt['junit'] = junit_counts(path)
-                    receipt['junit_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
-                except (OSError, ValueError, ET.ParseError):
-                    receipt['status'] = 'failed'
-            receipts[stage] = receipt
-            write(out/(stage+'.json'), receipt)
-            if code != 0:
-                write(out/'failure.json', failure(args.sha, stage, args.context, code))
-                break
+    boundary = {'executor': 'docker-no-host-mounts', 'passed': False, 'policy_hash': initial_policy,
+                'source_hash': digest(expected_source), 'approved_image': config['candidate_image'],
+                'boundary_proof_sha256': config['boundary_proof_sha256']}
+    try:
+        with isolation.DockerBoundary(config, execute) as executor:
+            executor.seed(source, env)
+            # These paths must not exist or be writable inside the candidate namespace.
+            probe = ('import os,pathlib; assert os.getuid()==10001; '
+                     'assert os.access("/work",os.W_OK); '
+                     'paths=' + repr([str(Path(__file__).resolve().parent), str(out), str(key_file),
+                                     '/var/run/docker.sock', '/run/docker.sock']) + '; '
+                     'assert all(not pathlib.Path(p).exists() for p in paths)')
+            if executor.run(['python3', '-c', probe], env, out/'boundary-probe.log', 30):
+                raise ValueError('runtime namespace/access probe failed')
+            for name, command in [('composer', ['composer', 'install', '--no-scripts', '--no-plugins', '--prefer-dist', '--no-progress']),
+                                  ('bun', ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'])]:
+                if executor.run(command, env, out/(name+'-install.log'), 600, config['package_network']):
+                    raise ValueError('isolated locked dependency install failed: ' + name)
+            for stage, command in commands.items():
+                if executor.source_manifest(expected_source, env) != expected_source:
+                    raise ValueError('candidate source changed before ' + stage)
+                start = time.monotonic()
+                code = executor.run(command, env, out/(stage+'.log'), contract['maximum_command_seconds'])
+                if executor.source_manifest(expected_source, env) != expected_source:
+                    raise ValueError('candidate source changed during ' + stage)
+                receipt = {'schema_version': 1, 'sha': args.sha, 'context': args.context,
+                           'contract_hash': digest(contract), 'stage': stage, 'command': command,
+                           'executed': True, 'status': 'passed' if code == 0 else 'failed',
+                           'exit_code': code, 'duration_seconds': round(time.monotonic()-start, 3)}
+                if stage in TEST_STAGES:
+                    try:
+                        path = out/(stage+'.xml')
+                        path.write_bytes(executor.report(stage))
+                        receipt['junit'] = junit_counts(path)
+                        receipt['junit_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    except (OSError, ValueError, ET.ParseError):
+                        receipt['status'] = 'failed'
+                receipts[stage] = receipt
+                write(out/(stage+'.json'), receipt)
+                if code != 0:
+                    write(out/'failure.json', failure(args.sha, stage, args.context, code))
+                    break
+        isolation.clean_head(root, args.sha)
+        if policy_hash() != initial_policy:
+            raise ValueError('trusted verifier policy changed during execution')
+        boundary['passed'] = True
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        boundary['error'] = str(error)
+        write(out/'failure.json', failure(args.sha, 'isolation', args.context, 1))
+    finally:
+        try:
+            isolation.clean_head(root, args.sha)
+            if policy_hash() != initial_policy:
+                raise ValueError('trusted verifier policy changed during execution')
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            boundary.update(passed=False, error=str(error))
+            write(out/'failure.json', failure(args.sha, 'provenance', args.context, 1))
+        write(out/'boundary.json', boundary)
     errors = validate(receipts, args.sha, args.context, digest(contract))
+    if not boundary['passed']:
+        errors.append('container isolation/provenance boundary failed')
     if errors and not (out/'failure.json').exists():
         write(out/'failure.json', failure(args.sha, 'evidence', args.context, 1))
     write(out/'gate.json', {"passed": not errors, "sha": args.sha, "errors": errors})
+    seal_evidence(out, key_file, args.sha, args.context)
     return {"passed": not errors, "sha": args.sha, "errors": errors, "output": str(out)}
 
 
@@ -262,13 +374,19 @@ def main():
     preflight = commands.add_parser('preflight', help='validate policy and explicit runner approval; no writes')
     preflight.add_argument('--renovate', default='renovate.json')
     preflight.add_argument('--ci', action='store_true')
+    preflight.add_argument('--runner', action='store_true')
     check = commands.add_parser('check', help='run isolated full checks; writes receipts only; never deploys')
     for name in ('root', 'sha', 'context', 'output'):
         check.add_argument('--'+name, required=True)
+    check.add_argument('--key-file', required=True)
     check.add_argument('--dry-run', action='store_true')
     gate = commands.add_parser('gate', help='validate all current execution receipts')
     for name in ('sha', 'context', 'output'):
         gate.add_argument('--'+name, required=True)
+    gate.add_argument('--key-file', required=True)
+    final = commands.add_parser('final', help='reject missing/skipped/failed prerequisite jobs')
+    for name in ('sha', 'context', 'needs'):
+        final.add_argument('--'+name, required=True)
     policy = commands.add_parser('policy', help='verify a normalized proposed update against the age/security policy')
     policy.add_argument('--update', required=True)
     args = parser.parse_args()
@@ -279,14 +397,21 @@ def main():
             if args.ci and (os.environ.get('MAINTENANCE_RUNNER_APPROVED') != 'true' or
                             os.environ.get('MAINTENANCE_RUNNER_ISOLATED') != 'true'):
                 errors.append('approved isolated runner required; see docs/maintenance-pilot.md')
+            if args.runner:
+                approved = isolation.approved_config()
+                isolation.DockerBoundary(approved, execute).preflight()
             result = {'passed': not errors, 'errors': errors, 'mode': 'pr-only'}
         elif args.action == 'policy':
             allowed, reason = eligibility(load(args.update), dt.datetime.now(dt.timezone.utc))
             result = {'passed': allowed, 'reason': reason, 'tests_and_review_still_required': True}
         elif args.action == 'check':
             result = {'passed': True, 'dry_run': True, 'stages': list(STAGES), 'side_effects': 'isolated test files and receipts only'} if args.dry_run else run_checks(args, contract)
+        elif args.action == 'final':
+            errors = final_results(json.loads(args.needs), args.sha, args.context)
+            result = {'passed': not errors, 'sha': args.sha, 'errors': errors}
         else:
             out = Path(args.output)
+            verify_seal(out, args.key_file, args.sha, args.context)
             receipts = {stage: load(out/(stage+'.json')) for stage in STAGES if (out/(stage+'.json')).is_file()}
             errors = validate(receipts, args.sha, args.context, digest(contract))
             # Rehash and reparse actual reports instead of trusting receipt summaries.
