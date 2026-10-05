@@ -1,0 +1,54 @@
+name: Maintenance quarantine
+
+on:
+  workflow_run:
+    workflows: [Maintenance pilot]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: maintenance-quarantine-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  quarantine:
+    if: vars.MAINTENANCE_PILOT_ENABLED == 'true' && contains(fromJSON('["failure", "timed_out", "cancelled"]'), github.event.workflow_run.conclusion) && startsWith(github.event.workflow_run.head_branch, 'maintenance/') && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-controller]
+    timeout-minutes: 5
+    steps:
+      # No checkout, artifact execution or candidate code in this credentialed job.
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const refs = run.pull_requests || [];
+            if (refs.length !== 1) {
+              core.setFailed('Expected one PR; preserve the failed run for manual triage.');
+              return;
+            }
+            const number = refs[0].number;
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
+            if (pr.state !== 'open' || pr.head.sha !== run.head_sha ||
+                pr.head.repo.full_name !== context.payload.repository.full_name ||
+                !pr.head.ref.startsWith('maintenance/')) {
+              core.setFailed('Stale or out-of-scope failure: do not mutate a different candidate.');
+              return;
+            }
+            const marker = `<!-- maintenance-quarantine:${pr.head.sha} -->`;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              {...context.repo, issue_number: number, per_page: 100});
+            await github.rest.issues.addLabels({...context.repo, issue_number: number,
+              labels: ['maintenance-quarantined']});
+            if (!comments.some(c => c.user?.type === 'Bot' && c.body?.includes(marker))) {
+              await github.rest.issues.createComment({...context.repo, issue_number: number,
+                body: `${marker}\nMaintenance candidate quarantined at ${pr.head.sha}.\n` +
+                  `Evidence: ${run.html_url}\n` +
+                  'OpsBot handoff: reproduce baseline versus candidate, retain this PR as owner, ' +
+                  'and attach failing-before/passing-after proof. At most two safe infrastructure ' +
+                  'retries and three correction rounds. No automatic merge, deployment or external notification.'});
+            }

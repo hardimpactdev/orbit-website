@@ -1,0 +1,156 @@
+name: Maintenance pilot
+
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Scan is read-only. Candidate permits Renovate draft PRs after enablement.
+        type: choice
+        options: [scan, candidate]
+        default: scan
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.event.pull_request.number || 'scan' }}
+  cancel-in-progress: false
+
+jobs:
+  eligibility:
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-controller]
+    timeout-minutes: 5
+    steps:
+      # Metadata only: fork code never runs on a private candidate runner.
+      - name: Reject an unsupported candidate instead of returning skipped success
+        env:
+          SAME_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          MAINTENANCE_RUNNER_APPROVED: ${{ vars.MAINTENANCE_RUNNER_APPROVED }}
+          MAINTENANCE_RUNNER_ISOLATED: ${{ vars.MAINTENANCE_RUNNER_ISOLATED }}
+        run: |
+          test "$SAME_REPOSITORY" = true
+          test "$MAINTENANCE_RUNNER_APPROVED" = true
+          test "$MAINTENANCE_RUNNER_ISOLATED" = true
+
+  scan:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.MAINTENANCE_PILOT_ENABLED == 'true'
+    # Dedicated disposable controller VM. No shared Sabre or hosted-runner fallback.
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-controller]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fail closed before acquiring write credentials
+        env:
+          MAINTENANCE_RUNNER_APPROVED: ${{ vars.MAINTENANCE_RUNNER_APPROVED }}
+          MAINTENANCE_RUNNER_ISOLATED: ${{ vars.MAINTENANCE_RUNNER_ISOLATED }}
+        run: python3 scripts/maintenance/maintenance.py preflight --ci
+      - name: Repository-scoped maintenance App
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.MAINTENANCE_APP_ID }}
+          private-key: ${{ secrets.MAINTENANCE_APP_PRIVATE_KEY }}
+          owner: nckrtl
+          repositories: orbit-website
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Deterministic upstream scan or draft candidate
+        uses: renovatebot/github-action@8e77cf46224fc50340c7721f3022d7af87a8ffaa
+        with:
+          configurationFile: scripts/maintenance/renovate.cjs
+          token: ${{ steps.app.outputs.token }}
+          renovate-version: 44.137.0
+          mount-docker-socket: false
+          additional-env-list: MAINTENANCE_CANDIDATE_MODE
+        env:
+          MAINTENANCE_CANDIDATE_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate') && 'candidate' || 'scan' }}
+          RENOVATE_ALLOW_SCRIPTS: 'false'
+          RENOVATE_ALLOW_PLUGINS: 'false'
+          RENOVATE_ALLOWED_COMMANDS: '[]'
+          LOG_LEVEL: info
+      - name: Record controller outcome without external notifications
+        if: always()
+        env:
+          UPSTREAM_STATUS: ${{ job.status }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          result = {'schema_version': 1, 'stage': 'upstream-scan', 'status': os.environ['UPSTREAM_STATUS'],
+                    'sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                    'external_notification_sent': False, 'mode': 'pr-only'}
+          pathlib.Path('maintenance-scan.json').write_text(json.dumps(result, indent=2) + '\n')
+          PY
+      - name: Retain controller receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maintenance-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: maintenance-scan.json
+          if-no-files-found: error
+          retention-days: 14
+      # Scheduled runs remain scan-only for this pilot. Candidate publication is explicit.
+
+  verify:
+    needs: eligibility
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-isolated]
+    timeout-minutes: 45
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      PROOF_CONTEXT: ${{ github.run_id }}/${{ github.run_attempt }}
+      PROOF_DIR: ${{ runner.temp }}/maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Trusted policy from the base commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+      - name: Exact candidate head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Require approved isolation and trusted policy
+        working-directory: policy
+        env:
+          MAINTENANCE_RUNNER_APPROVED: ${{ vars.MAINTENANCE_RUNNER_APPROVED }}
+          MAINTENANCE_RUNNER_ISOLATED: ${{ vars.MAINTENANCE_RUNNER_ISOLATED }}
+        run: |
+          python3 scripts/maintenance/maintenance.py preflight --ci
+          python3 scripts/maintenance/test_maintenance.py
+      - name: Install locked dependencies without lifecycle scripts or host credentials
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          test ! -e .env.testing
+          mkdir -p "$RUNNER_TEMP/package-home"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" COMPOSER_NO_INTERACTION=1 composer install --no-scripts --no-plugins --prefer-dist --no-progress
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" bun install --frozen-lockfile --ignore-scripts
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: MAIL_MAILER=array QUEUE_CONNECTION=sync php artisan package:discover
+      - name: Full suites and explicit browser proof
+        run: |
+          python3 policy/scripts/maintenance/maintenance.py --contract policy/.maintenance/contract.json check \
+            --root candidate --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR"
+      - name: Always evaluate the evidence gate
+        if: always()
+        run: |
+          python3 policy/scripts/maintenance/maintenance.py --contract policy/.maintenance/contract.json gate \
+            --sha "$EXPECTED_SHA" --context "$PROOF_CONTEXT" --output "$PROOF_DIR"
+      - name: Retain execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maintenance-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ${{ env.PROOF_DIR }}
+          if-no-files-found: error
+          retention-days: 14
