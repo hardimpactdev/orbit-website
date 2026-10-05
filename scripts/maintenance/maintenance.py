@@ -157,7 +157,8 @@ def withheld_testing_fixture(root):
     fixture = root / '.env.testing'
     if fixture.is_symlink():
         raise ValueError('testing fixture must not be a symlink')
-    with tempfile.TemporaryDirectory(prefix='orbit-maintenance-opaque-fixture-') as temp:
+    # A rename must stay on the checkout's filesystem; /tmp may be another mount.
+    with tempfile.TemporaryDirectory(prefix='.orbit-maintenance-opaque-fixture-', dir=root.parent) as temp:
         backup = Path(temp) / 'fixture'
         existed = fixture.exists()
         if existed:
