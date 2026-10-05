@@ -153,7 +153,7 @@ def safe_environment(root, home):
 
 @contextmanager
 def withheld_testing_fixture(root):
-    """Never read an existing testing environment file; restore it after synthetic-env checks."""
+    """Replace the opaque fixture with an empty synthetic file, then restore it unread."""
     fixture = root / '.env.testing'
     if fixture.is_symlink():
         raise ValueError('testing fixture must not be a symlink')
@@ -164,6 +164,12 @@ def withheld_testing_fixture(root):
         if existed:
             fixture.rename(backup)
         try:
+            # Laravel selects this file from APP_ENV=testing. Leaving it absent makes
+            # dotenv fall back to the intentionally absent .env and warn on every test.
+            # All configuration values still come from safe_environment, never this file.
+            with fixture.open('x') as synthetic:
+                synthetic.write('# Synthetic maintenance fixture; configuration is supplied by the process.\n')
+            fixture.chmod(0o600)
             yield
         finally:
             # Only a file created by this isolated test run can now occupy this path.
@@ -210,11 +216,11 @@ def run_checks(args, contract):
         raise ValueError("use a fresh output directory; stale receipts must never pass")
     out.mkdir(parents=True, exist_ok=True)
     commands = {
-        'php': ['php', 'vendor/bin/pest', '--no-tia', '--testsuite=Unit,Feature', '--log-junit', str(out/'php.xml')],
+        'php': ['php', 'vendor/bin/pest', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--testsuite=Unit,Feature', '--log-junit', str(out/'php.xml')],
         'analysis': ['composer', 'analyse'],
         'frontend': ['vp', 'check'],
         'build': ['bun', 'run', 'build'],
-        'browser': ['php', 'scripts/run-browser-tests.php', '--no-tia', '--log-junit', str(out/'browser.xml')],
+        'browser': ['php', 'scripts/run-browser-tests.php', '--no-tia', '--fail-on-warning', '--fail-on-risky', '--log-junit', str(out/'browser.xml')],
     }
     receipts = {}
     with withheld_testing_fixture(root), tempfile.TemporaryDirectory(prefix='orbit-maintenance-') as home:

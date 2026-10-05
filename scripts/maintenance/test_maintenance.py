@@ -109,9 +109,19 @@ class MaintenanceProofTest(unittest.TestCase):
             fixture.write_text('synthetic fixture for this unit test')
             with self.assertRaises(RuntimeError):
                 with m.withheld_testing_fixture(root):
-                    self.assertFalse(fixture.exists())
+                    self.assertTrue(fixture.read_text().startswith('# Synthetic maintenance fixture;'))
+                    self.assertEqual(0o600,fixture.stat().st_mode & 0o777)
                     raise RuntimeError('simulated test failure')
             self.assertEqual('synthetic fixture for this unit test',fixture.read_text())
+
+    def test_synthetic_fixture_is_removed_when_no_original_existed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            fixture=root/'.env.testing'
+            with m.withheld_testing_fixture(root):
+                self.assertTrue(fixture.is_file())
+                self.assertNotIn('APP_KEY=',fixture.read_text())
+            self.assertFalse(fixture.exists())
 
     def test_junit_counts_cases_without_double_counting_parent_summaries(self):
         xml = '<testsuites tests="2"><testsuite tests="2"><testcase assertions="3"/><testcase assertions="1"><skipped/></testcase></testsuite></testsuites>'
