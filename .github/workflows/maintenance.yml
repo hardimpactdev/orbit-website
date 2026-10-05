@@ -2,7 +2,7 @@ name: Maintenance pilot
 
 on:
   schedule:
-    - cron: '17 1 * * *'
+    - cron: "17 1 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -72,9 +72,9 @@ jobs:
           additional-env-list: MAINTENANCE_CANDIDATE_MODE
         env:
           MAINTENANCE_CANDIDATE_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate') && 'candidate' || 'scan' }}
-          RENOVATE_ALLOW_SCRIPTS: 'false'
-          RENOVATE_ALLOW_PLUGINS: 'false'
-          RENOVATE_ALLOWED_COMMANDS: '[]'
+          RENOVATE_ALLOW_SCRIPTS: "false"
+          RENOVATE_ALLOW_PLUGINS: "false"
+          RENOVATE_ALLOWED_COMMANDS: "[]"
           LOG_LEVEL: info
       - name: Record controller outcome without external notifications
         if: always()
@@ -106,8 +106,9 @@ jobs:
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       PROOF_CONTEXT: ${{ github.run_id }}/${{ github.run_attempt }}
-      PROOF_DIR: ${{ runner.temp }}/maintenance-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Initialize the proof location after runner assignment
+        run: echo "PROOF_DIR=$RUNNER_TEMP/maintenance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Trusted policy from the base commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
