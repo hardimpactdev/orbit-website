@@ -103,6 +103,7 @@ YAML through the runner service's admission control. The verifier does not claim
 its repository YAML or an approval variable can police a malicious replacement workflow.
 
 Keep separate repository-allowlisted labels:
+
 - `orbit-website-maintenance-controller`: reviewed main-only scan/reporting, isolated
   Docker daemon, no host socket mounted into Renovate, no production access.
 - `orbit-website-maintenance-isolated`: trusted host verifier plus the boundary above;
