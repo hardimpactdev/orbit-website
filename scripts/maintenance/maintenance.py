@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PR-only maintenance proofs. JSON output; no merge, deploy or notification API."""
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import json
@@ -137,7 +138,7 @@ def failure(sha, stage, context, exit_code):
 def safe_environment(root, home):
     # Do not inherit CI tokens, cloud keys or application environment from the host.
     # Candidate code can still read its own VM filesystem: CI therefore requires a clean VM.
-    return {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    return {"PATH": str(root / 'node_modules/.bin') + ':' + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(home), "TMPDIR": str(home), "CI": "true", "NO_COLOR": "1",
             "APP_ENV": "testing", "APP_URL": "http://127.0.0.1",
             "APP_KEY": "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -148,6 +149,27 @@ def safe_environment(root, home):
             "NIGHTWATCH_ENABLED": "false", "TELESCOPE_ENABLED": "false",
             "VP_GIT_HOOKS": "0", "COMPOSER_NO_INTERACTION": "1",
             "PLAYWRIGHT_BROWSERS_PATH": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/playwright")}
+
+
+@contextmanager
+def withheld_testing_fixture(root):
+    """Never read an existing testing environment file; restore it after synthetic-env checks."""
+    fixture = root / '.env.testing'
+    if fixture.is_symlink():
+        raise ValueError('testing fixture must not be a symlink')
+    with tempfile.TemporaryDirectory(prefix='orbit-maintenance-opaque-fixture-') as temp:
+        backup = Path(temp) / 'fixture'
+        existed = fixture.exists()
+        if existed:
+            fixture.rename(backup)
+        try:
+            yield
+        finally:
+            # Only a file created by this isolated test run can now occupy this path.
+            if fixture.exists():
+                fixture.unlink()
+            if existed:
+                backup.rename(fixture)
 
 
 def execute(command, root, env, log, timeout):
@@ -164,12 +186,20 @@ def execute(command, root, env, log, timeout):
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
             return 124
+        except BaseException:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            raise
 
 
 def run_checks(args, contract):
     root, out = Path(args.root).resolve(), Path(args.output).resolve()
-    if (root / '.env').exists() or (root / '.env.testing').exists():
-        raise ValueError("isolated checkout must not contain .env or .env.testing; do not reuse live app configuration")
+    if (root / '.env').exists():
+        raise ValueError("isolated checkout must not contain .env; do not reuse live app configuration")
     if (root / 'bootstrap/cache/config.php').exists():
         raise ValueError("cached application configuration is forbidden in isolated validation")
     head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -186,7 +216,7 @@ def run_checks(args, contract):
         'browser': ['php', 'scripts/run-browser-tests.php', '--no-tia', '--log-junit', str(out/'browser.xml')],
     }
     receipts = {}
-    with tempfile.TemporaryDirectory(prefix='orbit-maintenance-') as home:
+    with withheld_testing_fixture(root), tempfile.TemporaryDirectory(prefix='orbit-maintenance-') as home:
         env = safe_environment(root, Path(home))
         for stage, command in commands.items():
             start = time.monotonic()

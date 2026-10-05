@@ -102,6 +102,17 @@ class MaintenanceProofTest(unittest.TestCase):
                            m.safe_environment(ROOT,Path(tmp)),Path(tmp)/'timeout.log',0.05)
             self.assertEqual(124,code)
 
+    def test_testing_fixture_is_withheld_and_restored_even_on_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            fixture=root/'.env.testing'
+            fixture.write_text('synthetic fixture for this unit test')
+            with self.assertRaises(RuntimeError):
+                with m.withheld_testing_fixture(root):
+                    self.assertFalse(fixture.exists())
+                    raise RuntimeError('simulated test failure')
+            self.assertEqual('synthetic fixture for this unit test',fixture.read_text())
+
     def test_junit_counts_cases_without_double_counting_parent_summaries(self):
         xml = '<testsuites tests="2"><testsuite tests="2"><testcase assertions="3"/><testcase assertions="1"><skipped/></testcase></testsuite></testsuites>'
         with tempfile.TemporaryDirectory() as tmp:

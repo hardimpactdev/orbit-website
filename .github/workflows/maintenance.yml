@@ -23,7 +23,7 @@ concurrency:
 jobs:
   eligibility:
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-controller]
+    runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-isolated]
     timeout-minutes: 5
     steps:
       # Metadata only: fork code never runs on a private candidate runner.
@@ -42,6 +42,7 @@ jobs:
     # Dedicated disposable controller VM. No shared Sabre or hosted-runner fallback.
     runs-on: [self-hosted, linux, x64, sabre, orbit-website-maintenance-controller]
     timeout-minutes: 30
+    environment: maintenance-controller
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -132,11 +133,9 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e .env
-          test ! -e .env.testing
           mkdir -p "$RUNNER_TEMP/package-home"
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" COMPOSER_NO_INTERACTION=1 composer install --no-scripts --no-plugins --prefer-dist --no-progress
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" bun install --frozen-lockfile --ignore-scripts
-          env -i PATH="$PATH" HOME="$RUNNER_TEMP/package-home" APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: MAIL_MAILER=array QUEUE_CONNECTION=sync php artisan package:discover
       - name: Full suites and explicit browser proof
         run: |
           python3 policy/scripts/maintenance/maintenance.py --contract policy/.maintenance/contract.json check \

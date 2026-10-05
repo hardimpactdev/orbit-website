@@ -55,8 +55,12 @@ There is no hosted/shared runner fallback and no runner registration in this bra
 Install a dedicated maintenance GitHub App on this repository only. It needs
 Contents write and Pull requests write to create draft candidates, plus verified
 read access to security advisories/Dependabot alerts for the security lane.
-Supply `MAINTENANCE_APP_ID` and `MAINTENANCE_APP_PRIVATE_KEY` through GitHub's
-protected configuration. Do not reuse ReviewBot's personal credential.
+Create environment `maintenance-controller` with deployment branch access limited
+to protected `main`, no PR refs or tags. Supply `MAINTENANCE_APP_PRIVATE_KEY` only
+as that environment's secret, and `MAINTENANCE_APP_ID` as a variable. The controller
+runner admission policy must accept only the reviewed default-branch scan/reporting
+workflows. PR metadata and candidate jobs use the unprivileged isolated runner.
+Do not store this App key as a repository-wide secret or reuse ReviewBot's credential.
 Set `MAINTENANCE_PILOT_ENABLED=true` only after the reviewed policy is on main and
 the runner/App proofs pass. Do not run candidate code in `pull_request_target`.
 
@@ -104,9 +108,12 @@ python3 scripts/maintenance/maintenance.py gate --sha FULL_HEAD_SHA \
   --context local-validation --output /tmp/unique-new-maintenance-receipts
 ```
 
-Use a clean development checkout with no `.env`, `.env.testing` or cached application
-config. Never run this against a live instance. Install locked dependencies without
-lifecycle scripts in a clean environment, then perform explicit package discovery.
+Use a clean development checkout with no `.env` or cached application config.
+The checked-in `.env.testing` fixture is temporarily withheld without reading its
+contents and restored in a finally block. Tests receive synthetic SQLite-memory,
+array-mail, synchronous-queue settings and a disposable HOME. Never run this against
+a live instance. Install locked dependencies without lifecycle scripts in a clean
+environment; Laravel builds its package manifest when the isolated app boots.
 `check --dry-run` describes stages without executing them. Local receipts are
 clearly identified as local and do not substitute for approved Actions execution.
 
