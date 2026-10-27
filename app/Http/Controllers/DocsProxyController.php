@@ -31,12 +31,13 @@ class DocsProxyController extends Controller
         ]);
 
         $headers = collect($response->headers())
-            ->except([
+            ->reject(fn (array|string $value, string $name): bool => in_array(strtolower($name), [
                 'connection',
                 'content-encoding',
+                'content-length',
                 'keep-alive',
                 'transfer-encoding',
-            ])
+            ], true))
             ->map(fn (array|string $value): string => is_array($value) ? (string) $value[0] : $value)
             ->all();
 
