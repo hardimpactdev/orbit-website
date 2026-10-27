@@ -21,3 +21,17 @@ Inertia's development SSR endpoint is `/__inertia_ssr` at the backend root. Set
 loopback Vite URL, without `/__orbit/vite`, when the Laravel process cannot reach
 that endpoint through the public proxy. Keep SSR enabled and verify initial HTML
 with JavaScript disabled as well as client hydration.
+
+## Hydration regression
+
+Run `bun run test:hydration` for the actual agent scene. It builds React in
+development mode into a disposable directory, captures `console.error` before
+hydration, and models the tiny `Math.hypot` differences between JavaScript
+engines. It checks that the scene is present without JavaScript and that its
+initial SVG geometry survives hydration. Removing the SVG precision repair
+makes this test fail with React's attribute-mismatch warning. Pest's default
+console recorder does not capture that warning.
+
+The test uses intercepted requests, with no app server, shared SSR port or
+database. Install Playwright Chromium first (`bunx playwright install chromium`).
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing local Chrome.

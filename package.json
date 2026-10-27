@@ -4,7 +4,8 @@
     "scripts": {
         "build": "vp build && vp build --ssr",
         "dev": "vp dev",
-        "prepare": "vp config"
+        "prepare": "vp config",
+        "test:hydration": "node --test tests/agent-network-hydration.mjs"
     },
     "dependencies": {
         "@base-ui/react": "^1.8.0",
