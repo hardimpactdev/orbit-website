@@ -3011,10 +3011,6 @@
 }
 
 @media (max-width: 1100px) {
-    /* Leave the local development toolbar usable without covering navigation. */
-    :root:has(#laravel-toolbar-shadow-host) {
-        --mobile-menu-clearance: max(76px, env(safe-area-inset-bottom));
-    }
     :root {
         --dur-header-enter: 700ms;
         --delay-hero-intro: 80ms;
