@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "72295eca954df7a631415beb6b1146a8",
+    "content-hash": "780c5ec0422918375170461b2c34fdc2",
     "packages": [
         {
             "name": "brick/math",
@@ -8910,46 +8910,6 @@
                 "source": "https://github.com/hamcrest/hamcrest-php/tree/v3.0.0"
             },
             "time": "2026-03-17T11:56:53+00:00"
-        },
-        {
-            "name": "hardimpactdev/maintainer",
-            "version": "v0.2.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/hardimpactdev/maintainer.git",
-                "reference": "5ce90d19f7cc4abacff28e3b564e48b181656b67"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/hardimpactdev/maintainer/zipball/5ce90d19f7cc4abacff28e3b564e48b181656b67",
-                "reference": "5ce90d19f7cc4abacff28e3b564e48b181656b67",
-                "shasum": ""
-            },
-            "require": {
-                "php": "^8.4"
-            },
-            "require-dev": {
-                "pestphp/pest": "^5.0"
-            },
-            "bin": [
-                "bin/maintainer"
-            ],
-            "type": "library",
-            "autoload": {
-                "classmap": [
-                    "src/"
-                ]
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "description": "Repo-owned dependency updates for Composer, npm, Bun, and Expo.",
-            "support": {
-                "issues": "https://github.com/hardimpactdev/maintainer/issues",
-                "source": "https://github.com/hardimpactdev/maintainer/tree/v0.2.0"
-            },
-            "time": "2026-10-26T09:50:38+00:00"
         },
         {
             "name": "iamcal/sql-parser",
