@@ -13,22 +13,14 @@ function resolveDevServerOrigin(): string | undefined {
     const port = process.env.ORBIT_DEV_SERVER_PORT?.trim();
     const appUrl = process.env.VITE_APP_URL?.trim() || process.env.APP_URL?.trim();
 
-    // Prefer host:port over Orbit's path-based ORBIT_DEV_SERVER_ORIGIN.
-    // /__orbit/vite currently falls through to Laravel (404), and the gateway's
-    // shared :5173 is claimed by Commander, so keep public/hot absent until the
-    // Orbit Vite proxy routes correctly for this instance.
-    if (host && port) {
-        try {
-            const protocol = appUrl ? new URL(appUrl).protocol : "https:";
-            return `${protocol}//${host}:${port}`;
-        } catch {
-            return `https://${host}:${port}`;
-        }
-    }
-
     const orbitOrigin = process.env.ORBIT_DEV_SERVER_ORIGIN?.trim();
     if (orbitOrigin) {
-        return orbitOrigin.replace(/\/$/, "");
+        return new URL(orbitOrigin).origin;
+    }
+
+    if (host && port) {
+        const protocol = appUrl ? new URL(appUrl).protocol : "https:";
+        return `${protocol}//${host}:${port}`;
     }
 
     return process.env.VITE_DEV_SERVER_ORIGIN?.trim() || undefined;
@@ -37,6 +29,7 @@ function resolveDevServerOrigin(): string | undefined {
 export default defineConfig(async (environment) => {
     const config = await launchConfig(environment);
     const origin = resolveDevServerOrigin();
+    const appOrigin = process.env.APP_URL?.trim();
     const allowedHost = process.env.ORBIT_DEV_SERVER_HOST?.trim();
 
     return {
@@ -44,6 +37,7 @@ export default defineConfig(async (environment) => {
         server: {
             ...config.server,
             ...(origin ? { origin } : {}),
+            ...(appOrigin ? { cors: { origin: appOrigin } } : {}),
             ...(allowedHost ? { allowedHosts: [allowedHost] } : {}),
         },
         fmt: { ignorePatterns: [".agents/**"] },

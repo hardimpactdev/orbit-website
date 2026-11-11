@@ -2,6 +2,7 @@ import { animateScene } from "./animation";
 import { useEffect, useId, useRef } from "react";
 import { ConstellationSignalGradient, constellationSignal, globe } from "./hero-constellation";
 import { hardwarePlane } from "./laptop";
+import { svgNumber } from "./svg-precision";
 
 const center = { x: 360, y: 175 };
 const orbit = { rx: 303.75, ry: 135 };
@@ -31,8 +32,10 @@ const position = (index: number, time = 0) => {
     const to = orbitSamples[high];
     const progress = (distance - from.distance) / (to.distance - from.distance);
     return {
-        x: center.x + from.x + (to.x - from.x) * progress,
-        y: center.y + from.y + (to.y - from.y) * progress,
+        // Node and browsers can differ in the last digits of Math.hypot.
+        // Serialize SVG coordinates at a stable precision for hydration.
+        x: svgNumber(center.x + from.x + (to.x - from.x) * progress),
+        y: svgNumber(center.y + from.y + (to.y - from.y) * progress),
     };
 };
 const connection = (to: { x: number; y: number }) => `M ${center.x} ${center.y} L ${to.x} ${to.y}`;

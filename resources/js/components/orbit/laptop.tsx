@@ -5,6 +5,8 @@ import { objectTransform, scalePoint } from "./object-scale";
 import { laptopCloseStart, storyEntranceEnd, storyLayoutBounds } from "./story-entrance";
 import { useSceneViewport } from "./use-scene-viewport";
 
+import { svgPath } from "./svg-precision";
+
 type Phase = "running" | "closing" | "sleeping" | "opening";
 const width = 300;
 const depth = 200;
@@ -250,7 +252,12 @@ export function deviceWall(width: number, height: number, radius: number, thickn
         ${arc} 0 ${radius + dx} ${height + dy} H ${width - radius + dx}
         ${arc} 0 ${width + dx} ${height - radius + dy} V ${radius + dy}
         ${arc} 0 ${start[0] + dx} ${start[1] + dy} L ${start.join(" ")}`;
-    return { dx, dy, fill: `${front} ${back} Z`, outline: `M ${end.join(" ")} ${back}` };
+    return {
+        dx,
+        dy,
+        fill: svgPath(`${front} ${back} Z`),
+        outline: svgPath(`M ${end.join(" ")} ${back}`),
+    };
 }
 const bodyWall = deviceWall(width, depth, laptopRadius, bodyThickness);
 const queuePort: Point = [
