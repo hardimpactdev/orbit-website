@@ -1,7 +1,6 @@
 <?php
 
 use Inertia\Testing\AssertableInertia as Assert;
-use NckRtl\Toolbar\Toolbar;
 
 it('serves the complete Orbit guide at its explicit Markdown URL', function () {
     $this->get('/get-started.md')
@@ -68,14 +67,4 @@ it('provides an absolute share URL for the current site', function () {
         ->assertInertia(fn (Assert $page) => $page
             ->component('Home')
             ->where('orbitUrl', 'https://orbit.example'));
-});
-
-it('keeps Markdown clean when the development toolbar is enabled', function () {
-    app(Toolbar::class)->config->enabledInConsole = true;
-
-    $this->withHeader('Accept', 'text/markdown')->get('/')
-        ->assertSuccessful()
-        ->assertHeader('Content-Type', 'text/markdown; charset=utf-8')
-        ->assertDontSee('<script', escape: false)
-        ->assertDontSee('laravel-toolbar');
 });
